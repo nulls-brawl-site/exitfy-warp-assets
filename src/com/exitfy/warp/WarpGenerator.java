@@ -8,7 +8,11 @@ import java.net.HttpURLConnection;
 import java.net.URLEncoder;
 import java.net.URL;
 import java.security.SecureRandom;
+import java.text.SimpleDateFormat;
 import java.util.Base64;
+import java.util.Date;
+import java.util.Locale;
+import java.util.TimeZone;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -27,13 +31,23 @@ public final class WarpGenerator {
         String publicKeyB64 = b64(publicKey);
         String privateKeyB64 = b64(privateKey);
 
-        String body = "{\"key\":\"" + json(publicKeyB64) + "\",\"install_id\":\"\",\"fcm_token\":\"\",\"tos\":\"" + System.currentTimeMillis() + "\",\"type\":\"Android\",\"model\":\"Android\",\"locale\":\"en_US\"}";
-        String response = post("https://api.cloudflareclient.com/v0a4005/reg", body);
+        String body = "{\"install_id\":\"\",\"tos\":\"" + json(timestamp()) + "\",\"key\":\"" + json(publicKeyB64) + "\",\"fcm_token\":\"\",\"type\":\"Android\",\"locale\":\"en_US\"}";
+        String response = post("https://api.cloudflareclient.com/v0a4005/reg", body, "");
+        String accountId = first(response, "\\\"id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
+        String token = first(response, "\\\"token\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
+        if (accountId.length() == 0 || token.length() == 0) {
+            throw new RuntimeException("warp registration missing id/token");
+        }
+        try {
+            patch("https://api.cloudflareclient.com/v0a4005/reg/" + accountId, "{\"warp_enabled\":true}", token);
+        } catch (Throwable ignored) {
+        }
+        response = get("https://api.cloudflareclient.com/v0a4005/reg/" + accountId, token);
 
         String peerKey = first(response, "\\\"public_key\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
         String endpoint = first(response, "\\\"host\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
-        String v4 = first(response, "\\\"v4\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
-        String v6 = first(response, "\\\"v6\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
+        String v4 = first(response, "\\\"addresses\\\"\\s*:\\s*\\{[^}]*\\\"v4\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
+        String v6 = first(response, "\\\"addresses\\\"\\s*:\\s*\\{[^}]*\\\"v6\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
         String clientId = first(response, "\\\"client_id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
 
         if (peerKey.length() == 0) {
@@ -42,10 +56,10 @@ public final class WarpGenerator {
         if (endpoint.length() == 0) {
             endpoint = "engage.cloudflareclient.com:2408";
         }
-        if (v4.length() == 0) {
+        if (v4.length() == 0 || v4.indexOf(':') >= 0) {
             v4 = "172.16.0.2";
         }
-        if (v6.length() == 0) {
+        if (v6.length() == 0 || v6.indexOf(']') >= 0) {
             v6 = "2606:4700:110:8765:93e4:6b5b:4b3d:1f8e";
         }
 
@@ -70,7 +84,7 @@ public final class WarpGenerator {
         return uri.toString();
     }
 
-    private static String post(String url, String body) throws Exception {
+    private static String post(String url, String body, String token) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         c.setRequestMethod("POST");
         c.setConnectTimeout(15000);
@@ -80,6 +94,7 @@ public final class WarpGenerator {
         c.setRequestProperty("Accept", "application/json");
         c.setRequestProperty("User-Agent", "okhttp/3.12.1");
         c.setRequestProperty("CF-Client-Version", "a-6.30-3596");
+        if (token != null && token.length() > 0) c.setRequestProperty("Authorization", "Bearer " + token);
         byte[] bytes = body.getBytes("UTF-8");
         c.setRequestProperty("Content-Length", String.valueOf(bytes.length));
         OutputStream os = c.getOutputStream();
@@ -92,6 +107,51 @@ public final class WarpGenerator {
             throw new RuntimeException("warp api http " + code + ": " + text);
         }
         return text;
+    }
+
+    private static String patch(String url, String body, String token) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setRequestMethod("PATCH");
+        c.setConnectTimeout(15000);
+        c.setReadTimeout(20000);
+        c.setDoOutput(true);
+        c.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+        c.setRequestProperty("Accept", "application/json");
+        c.setRequestProperty("User-Agent", "okhttp/3.12.1");
+        c.setRequestProperty("CF-Client-Version", "a-6.30-3596");
+        if (token != null && token.length() > 0) c.setRequestProperty("Authorization", "Bearer " + token);
+        byte[] bytes = body.getBytes("UTF-8");
+        c.setRequestProperty("Content-Length", String.valueOf(bytes.length));
+        OutputStream os = c.getOutputStream();
+        os.write(bytes);
+        os.close();
+        int code = c.getResponseCode();
+        InputStream is = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream();
+        String text = readAll(is);
+        if (code < 200 || code >= 300) throw new RuntimeException("warp api http " + code + ": " + text);
+        return text;
+    }
+
+    private static String get(String url, String token) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setRequestMethod("GET");
+        c.setConnectTimeout(15000);
+        c.setReadTimeout(20000);
+        c.setRequestProperty("Accept", "application/json");
+        c.setRequestProperty("User-Agent", "okhttp/3.12.1");
+        c.setRequestProperty("CF-Client-Version", "a-6.30-3596");
+        if (token != null && token.length() > 0) c.setRequestProperty("Authorization", "Bearer " + token);
+        int code = c.getResponseCode();
+        InputStream is = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream();
+        String text = readAll(is);
+        if (code < 200 || code >= 300) throw new RuntimeException("warp api http " + code + ": " + text);
+        return text;
+    }
+
+    private static String timestamp() {
+        SimpleDateFormat fmt = new SimpleDateFormat("yyyy-MM-dd\'T\'HH:mm:ss.SSSXXX", Locale.US);
+        fmt.setTimeZone(TimeZone.getTimeZone("UTC"));
+        return fmt.format(new Date());
     }
 
     private static String readAll(InputStream is) throws Exception {
